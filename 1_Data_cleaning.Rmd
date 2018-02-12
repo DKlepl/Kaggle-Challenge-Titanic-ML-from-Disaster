@@ -1,0 +1,55 @@
+---
+title: "Data Cleaning and Exploration"
+author: "Dominik Klepl"
+date: "12 2 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+data = readr::read_csv("train.csv")
+```
+
+```{r correct data classes}
+data$Survived = as.factor(data$Survived)
+data$Sex = as.factor(data$Sex)
+data$Embarked = as.factor(data$Embarked)
+```
+
+
+```{r}
+summary=summary(data)
+summary=as.data.frame(summary)
+summary=summary[-1]
+
+cor.test(data$Survived,data$Pclass) # -0.338
+cor.test(data$Survived,data$Age) #no
+cor.test(data$Survived,data$Fare) #.257
+```
+
+```{r feature engineering}
+#extract titles from names
+
+#extract decks from cabins i.e. deck A etc.
+
+#get family size - SibSp+Parch
+data$Family_size=data$SibSp+data$Parch
+
+#interaction terms for models like randomForest
+data$Age_Class = data$Age*data$Pclass
+```
+
+```{r treating missing values}
+data$Cabin[is.na(data$Cabin)==T]="None"
+
+#NAs in Age
+
+#NAs in Embarked - only two - replace with X
+data$Embarked[is.na(data$Embarked)==T]="X"
+
+
+m1=glm(Survived ~ Pclass,data=test)
+summary(m1)
+
+write.csv(data,"data_2.csv")
+```
+
