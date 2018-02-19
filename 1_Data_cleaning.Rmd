@@ -4,52 +4,274 @@ author: "Dominik Klepl"
 date: "12 2 2018"
 output: html_document
 ---
+# 1. Data Analysis
 
+###Load required libraries and data
 ```{r setup, include=FALSE}
+library(lmerTest)
+library(caret)
+library(pROC)
+library(dplyr)
+library(ggplot2)
+
 data = readr::read_csv("train.csv")
 ```
 
-```{r correct data classes}
+## 1.1 First data check
+First I need to check whether all features are the correct class or if they have missing values
+```{r data classes}
+column=seq(1:12)
+
+res = data.frame(feature={},NAs={})
+for (n in column) {
+  res[nrow(res)+1,1]=names(data[,n])
+  res[nrow(res),2]=sum(is.na(data[,n]))
+}
+print(res)
+
+```
+
+There are missing values in Age, Cabin and Embarked. 
+#todo: deal with NAs
+
+Next the balance of both classes (survived/died) needs to be checked to avoid excesive bias of the model.
+```{r balance of classes}
+sum(data$Survived==0) #549 survived
+sum(data$Survived==1) #343 died
+
+#compute no-information rate = if the model only guessed and marked all as Survived what accuracy it would have
+(sum(data$Survived==0)/length(data$Survived))*100
+
+#Survived needs to be factor
 data$Survived = as.factor(data$Survived)
+```
+
+The imbalance is not so pronounced but should be dealt with if the model behaves unpredictably.
+#todo: balance classes
+
+## 1.2 Data exploration
+Now explore the features in the dataset and look at their distributions. In case of continuous feature make a histogram. With categorical ones a bar plot is more effective.
+
+Start with Pclass. Most people are in 3rd class and most of these also died. Most survivors are in 1st class. In 2nd class it's 50-50.
+When the data is split also by gender we can see that almost all women in 1st class survived. For men being in 1st was best but it did not matter much whether they were in 2nd or 3rd class.
+
+#todo: feature engineer combination of class and sex
+```{r Pclass}
+#Pclass feature
+ggplot(data,aes(x=Pclass,fill=Survived))+
+  geom_bar(stat='count', position='stack')
+  
+
+ggplot(data,aes(x=Pclass,fill=Survived))+
+  geom_bar(stat='count', position='stack')+
+  facet_grid(~Sex)
+```
+
+Now sex. Majority of passengers were males (64.7 %). However only 18.9 % of them survived. We can assume that men left a place in boats to women. Which supports the fact that 74% of them survived. This big difference is likely a very good predictor.
+```{r Sex}
+#also sex should be a factor for plotting purposes
 data$Sex = as.factor(data$Sex)
-data$Embarked = as.factor(data$Embarked)
+
+(sum(data$Sex=="male")/891)*100 #64.76 males
+
+ggplot(data,aes(x=Sex,fill=Survived))+
+  geom_bar(stat='count',position='stack')
+
+#how many women survived then?
+sum(data$Sex=="female" & data$Survived==1)/sum(data$Sex=="female") #74% survived
+
+#and men?
+sum(data$Sex=="male" & data$Survived==1)/sum(data$Sex=="male") #18.9% survived
+```
+
+Now onto age. There are some likely hypotheses to draw from the distribution of age split by survivors. Children were the most likely to survive which makes sense. We can also assume that if parents let their children on boat then they probably died. That supports the fact that most dead were between 20 and 35. These could have been either the parents or singles or mix of both probably.
+
+There are also a lot of missing values. These need to be filled in by using feature engineering.
+#todo: predict age to fill NAs
+```{r Age}
+data$Age = as.factor(data$Age)
+
+ggplot(data,aes(x=Age,fill=Survived))+
+  geom_bar(stat="density")
+
+
+```
+
+The fare is probably not very good predictor but there are nonetheless some insights. As we already saw from the class feature most dead were in the 3rd class. These people were actually likely not to be passengers but ship crew and therefore their fare was 0. From the histogram of fare we can see that indeed those that paid nothing were more likely to die. Whereas those with the most expensive (but also exclusive) tickets were very likely to survive.
+
+It might be useful to engineer a new feature to separate crew from the passengers.
+#todo: create feature: crew (either 1 or 0)
+```{r Fare}
+ggplot(data,aes(x=Fare,fill=Survived))+
+  geom_bar(stat="density")
+```
+
+With the place where the passengers embarked it seems there is a mild trend of people embarking in S(Southampton) dying more. 
+
+#TODO: remove NAs
+Only 2, probably enough to replace with an X.
+```{r Embarked}
+ggplot(data,aes(x=Embarked,fill=Survived))+
+  geom_bar(stat='count',position='stack')
 ```
 
 
+```{r function for evaluating performance of models}
+performance = function (data) {
+  data$Predictions[data$PredictionsPerc>0.5]='1'
+  data$Predictions[data$PredictionsPerc<=0.5]='0'
+  c_matrix=confusionMatrix(data = data$Predictions, reference = data$Survived,positive='0')
+  
+  print(c_matrix)
+  #extract the measurements
+  Accuracy=c_matrix$overall[[1]]
+  Sensitivity=c_matrix$byClass[[1]]
+  Specificity=c_matrix$byClass[[2]]
+  PPV=c_matrix$byClass[[3]]
+  NPV=c_matrix$byClass[[4]]
+  
+  #ROC
+  rocCurve <- roc(response = data$Survived, predictor =data$PredictionsPerc)
+  a=auc(rocCurve)#from 0 to 1 (+ being good)
+  AUC=a[1]
+  ROC_plot=plot(rocCurve, legacy.axes = TRUE)
+  
+  
+  output = cbind(Accuracy,Sensitivity,Specificity,PPV,NPV,AUC)
+  output=as.data.frame(output)
+  print(c_matrix)
+  print(ROC_plot)
+  return(output)
+}
+
+performance (data)
+```
+
+```{r cross-validation function}
+crossvalidate = function(model,nfold,data) {
+  predictions = data.frame()
+  `%not in%` <- function (x, table) is.na(match(x, table, nomatch=NA_integer_))
+  Folds = createFolds(unique(data$PassengerId),nfold)
+  for (f in Folds) {
+    train_d = subset(data, PassengerId %not in% f)
+    #subset including only 1 fold
+    test_d = subset(data, PassengerId %in% f)
+    #fit train subset into specified model
+    model_val = update(model, data = train_d)
+    test_d$PredictionsPerc=predict(model_val,test_d,type="response",allow.new.levels=TRUE)
+    prediction_fold = data.frame(PassengerId=test_d$PassengerId,Survived=test_d$Survived,PredictionsPerc=test_d$PredictionsPerc)
+    predictions = rbind(predictions,prediction_fold)
+  }
+
+  result = performance(predictions)
+  
+  return(result)
+}
+```
+
+## 1.3 Feature Engineering
+
+Let's follow up on some of the ##TODOs for unfolding some of the insights gained in previous section.
+
+First create a column: Class_sex i.e 1_M, 1_F and plot to see the effect of this new feature on rate of survives
+```{r class+sex}
+data=tidyr::unite(data, Class_sex, c(Pclass, Sex), remove=FALSE)
+
+data$Class_sex=as.factor(data$Class_sex)
+
+ggplot(data,aes(x=Class_sex,fill=Survived))+
+  geom_bar(stat="count", position="stack")
+```
+
+The column name might have also a lot of information. Therefore split the strings in "name" column into several features: Title and Surname.
 ```{r}
-summary=summary(data)
-summary=as.data.frame(summary)
-summary=summary[-1]
+#extract surnames - split a string into part before comma and after it and saves first part
+data$Surname = sapply(data$Name, function(x) {strsplit(x, split='[,]')[[1]][1]})
+#some of the surnames had also a maiden name included - get rid of that
+data$Surname = sapply(data$Surname, function(x) {strsplit(x, split='[-]')[[1]][1]})
 
-cor.test(data$Survived,data$Pclass) # -0.338
-cor.test(data$Survived,data$Age) #no
-cor.test(data$Survived,data$Fare) #.257
+#similarly with extracting title - only difference, split string by "," and "."
+data$Title = sapply(data$Name, function(x) {strsplit(x, split='[,.]')[[1]][2]})
+#now the title has a space before first letter - that's not desired
+data$Title = sub(" ","",data$Title)
+
+#explore and summarize titles into less categories
+#what kind of titles are there?
+Titles = as.factor(data$Title)
+levels(Titles)
+
+#women
+data$Title[data$Title=="Ms"] = "Miss"
+data$Title[data$Title=="Mlle"] = "Miss"
+data$Title[data$Title=="Mme"] = "Mrs"
+data$Title[data$Title=="Lady"] = "Mrs"
+data$Title[data$Title=="the Countess"] = "Mrs"
+
+#men
+data$Title[data$Title=="Don"] = "Mr"
+data$Title[data$Title=="Sir"] = "Mr"
+data$Title[data$Title=="Dr"] = "Mr"
+
+#rare titles
+data$Title[data$Title=="Capt"] = "Rare"
+data$Title[data$Title=="Col"] = "Rare"
+data$Title[data$Title=="Jonkheer"] = "Rare"
+data$Title[data$Title=="Rev"] = "Rare"
+data$Title[data$Title=="Major"] = "Rare"
 ```
 
-```{r feature engineering}
-#extract titles from names
+Now that the titles are extracted and grouped into smaller number of categories one can see that Masters (although not big in size) were very likely to survive. Similar counts for Misses and Mrs'. Misters on the other hand as expected from the "Sex" feature were less likely to survive. Then there is the rest of "rare" titles. As there are titles such as Captain and Major it is likely that these people as being part of the crew were doomed from the beginning.
+```{r}
+#turn Title into factor and check the result
+data$Title = as.factor(data$Title)
+levels(data$Title)
 
-#extract decks from cabins i.e. deck A etc.
-
-#get family size - SibSp+Parch
-data$Family_size=data$SibSp+data$Parch
-
-#interaction terms for models like randomForest
-data$Age_Class = data$Age*data$Pclass
+#how did the passengers survived based on their titles
+ggplot(data, aes(x=Title,fill=Survived))+
+  geom_bar(stat="count", position = "stack")
 ```
+
+
+Another new feature can be engineered from linear combination of SibSp(number of siblings or spouse) and Parch (number of guardians of children). It's size of a family. This is simply SibSP+Parch+1 (for the passenger oneself). Then plot this new feature to see how it affected survival.
+```{r}
+data$Family_size=data$SibSp+data$Parch+1
+data$Family_size=as.factor(data$Family_size)
+
+ggplot(data, aes(x=Family_size,fill=Survived))+
+  geom_bar(stat="count", position="stack")
+
+write.csv(data,"cleaner_data.csv",row.names = F)
+```
+
+Tickets-single people but travelling with non-family (friends)
+```{r}
+TicketGroup <- data %>%
+        select(Ticket) %>%
+        group_by(Ticket) %>%
+        summarise(Ticket_people=n())
+data <- left_join(data, TicketGroup, by = "Ticket")
+
+#how many of such non-family groups were there?
+sum(data$Ticket_people[data$Family_size==1]>1) #75 not much but still might get better info than family size of 1
+
+#since family size and ticket_people might overlap often let's keep only one of them, the one with bigger number
+
+data$Group = NA
+
+for (i in 1:nrow(data)) {
+  data$Group[i] = max(data$Family_size[i], data$Ticket_people[i])
+}
+
+data$Group=as.factor(data$Group)
+
+ggplot(data,aes(x=Group,fill=Survived))+
+  geom_bar(stat="count", position="stack")
+```
+
 
 ```{r treating missing values}
-data$Cabin[is.na(data$Cabin)==T]="None"
-
-#NAs in Age
 
 #NAs in Embarked - only two - replace with X
-data$Embarked[is.na(data$Embarked)==T]="X"
-
-
-m1=glm(Survived ~ Pclass,data=test)
-summary(m1)
-
-write.csv(data,"data_2.csv")
+data$Embarked[is.na(data$Embarked)]="X"
 ```
 
