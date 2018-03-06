@@ -156,8 +156,6 @@ performance = function (data) {
   print(ROC_plot)
   return(output)
 }
-
-performance (data)
 ```
 
 ```{r cross-validation function}
@@ -264,7 +262,7 @@ TicketGroup <- data_all %>%
 data_all <- left_join(data_all, TicketGroup, by = "Ticket")
 
 #how many of such non-family groups were there?
-sum(data$Ticket_people[data$Family_size==1]>1) #127 not much but still might get better info than family size of 1
+sum(data_all$Ticket_people[data_all$Family_size==1]>1) #127 not much but still might get better info than family size of 1
 
 #since family size and ticket_people might overlap often let's keep only one of them, the one with bigger number
 
@@ -281,6 +279,22 @@ data_all$Group=as.factor(data_all$Group)
 
 ggplot(subset(data_all,train==1),aes(x=Group,fill=Survived))+
   geom_bar(stat="count", position="stack")
+```
+
+```{r crew members}
+data_all$Crew=0
+data_all$Crew[data_all$Fare==0]=1
+
+sum(data_all$Crew==1)
+
+range(data_all$Age[data_all$Crew==0],na.rm=T)
+range(data_all$Age[data_all$Crew==1],na.rm=T)
+
+ggplot(subset(data_all,train==1),aes(x=Crew,fill=Survived))+
+  geom_bar(stat="count", position="stack")
+
+#how many of them are in test data
+sum(data_all$Crew[data_all$train==0]==1) #only two but any information might help in the end
 ```
 
 
@@ -301,7 +315,7 @@ data_all$train[is.na(data_all$Embarked)] #both in train data
 
 #train a model that can predict embark
 #create a subset with only usable features
-embark_data = data_all[c(-4,-9,-11,-13,-14,-15,-17,-18)]
+embark_data = data_all
 
 predict_embark = multinom(Embarked~Class_sex+Pclass+Sex+Age+SibSp+Parch+Fare+Title+Group,data=embark_data)
 embark_data$Predictions=predict(predict_embark,embark_data, type="class",allow.new.levels=T)
@@ -320,17 +334,76 @@ emb_fare2 = lm(Fare ~ Embarked, subset(embark_data,Embarked!="Q"))
 summary(emb_fare2)
 
 #the average fare in S was 27.46 => it's more probable that the NAs came from C - merge the models prediction for the 2 NAs with the original data
-embark_data$Embarked[is.na(embark_data$Embarked)]=embark_data$Predictions
-embark_data$Embarked[embark_data$Embarked==3]="C"
-embark_data=embark_data[c(1,9)]
+embark_NA = subset(embark_data,is.na(Embarked))
+embark_NA$Embarked=predict(predict_embark,embark_NA, type="class",allow.new.levels=T)
 
-data_all = merge(data_all,embark_data,by="PassengerId")
-data_all$Embarked=data_all$Embarked.y
-data_all$Embarked.y=NULL
-data_all$Embarked.x=NULL
+
+data_all$Embarked[data_all$PassengerId %in% embark_NA$PassengerId] = embark_NA$Embarked
+
 sum(is.na(data_all$Embarked))
 
-write.csv(data_all,"cleaner_data_all.csv",row.names = F)
+write.csv(data_all,"Data/cleaner_data_all.csv",row.names = F)
+```
+
+Now we fill in the missing values in age. We train a model that predicts age, this time we're aiming for a great performance as age seems to have a large effect on survival and also there is a lot of missing values in age column.
+
+```{r predict age}
+age_d = data_all
+sum(is.na(age_d$Age)) # 264 NAs
+
+age_d_c=subset(age_d,!is.na(Age))
+
+#turn all required features to factor
+age_d$Class_sex=as.integer(age_d$Class_sex)
+age_d$Group=as.integer(age_d$Group)
+```
+
+To evaluate the performance of my models I'll need a function for cross-validation. There are some functions in package however in this case I prefer to have full control over the process. Therefore let's build such function now.
+```{r}
+#building function for cross validation
+crossvalidation  = function (model,d) {
+  `%not in%` <- function (x, table) is.na(match(x, table, nomatch=NA_integer_))
+  Folds = createFolds(unique(d$PassengerId),10)
+  result={}
+  for (i in Folds) {
+    #subset of Fixations_visa except for the 1 fold
+    train_d = subset(d, PassengerId %not in% i)
+    train_d=subset(train_d,!is.na(train_d$Age))
+    #subset including only 1 fold
+    test_d = subset(d,  PassengerId %in% i)
+    test_d=subset(test_d,!is.na(test_d$Age))
+    #fit train subset into specified model
+    model_val = update(model,data=train_d)
+    #rmse of train data
+    pred1 = predict(model_val, train_d,allow.new.levels=T)
+    rmse_train=Metrics::rmse(train_d$Age[!is.na(pred1)],pred1[!is.na(pred1)])
+    
+    #rmse of test data
+    pred2 = predict(model_val, test_d,allow.new.levels=T)
+    rmse_test=Metrics::rmse(test_d$Age[!is.na(pred2)],pred2[!is.na(pred2)])
+    
+    res = cbind(rmse_train,rmse_test)
+    result=rbind(result,res)
+    
+  }
+  
+  final_res=data.frame(mean_train=mean(result[1]),mean_test=mean(result[2]))
+  return(final_res)
+}
+```
+
+Now that everything is prepared we can start fitting models.
+```{r create models}
+#linear regression is always a good start
+age_1 = lmer(Age ~Pclass+Sex+Fare+Embarked+Title+Group+(1|Surname),data=age_d_c)
+age_2 = lm(Age ~Pclass+Sex+Fare+Embarked+Title+Group,data=age_d_c)
+age_3 = lmer(Age ~Pclass+Fare+Embarked+Title+Group+(1|Surname),data=age_d_c)
+age_4 = lmer(Age ~Pclass+Sex+Fare+Embarked+Title+Group+Crew+(1|Surname),data=age_d_c)
+
+crossvalidation(age_1,age_d_c)
+crossvalidation(age_2,age_d_c)
+crossvalidation(age_3,age_d_c)
+crossvalidation(age_4,age_d_c)
 ```
 
 
